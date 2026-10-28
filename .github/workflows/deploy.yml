@@ -5,17 +5,17 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 仓库的 Pages 用的是 legacy 模式（从 gh-pages 分支发布），
+# 所以这里不调用 actions/deploy-pages，而是把构建产物推到 gh-pages 分支。
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
   cancel-in-progress: true
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -46,17 +46,11 @@ jobs:
       - name: SPA fallback
         run: cp dist/index.html dist/404.html
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          # 注意：upload-pages-artifact 的 path 相对仓库根目录
-          path: app/dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./app/dist
+          publish_branch: gh-pages
+          commit_message: 'deploy: ${{ github.event.head_commit.message }}'
+          enable_jekyll: false

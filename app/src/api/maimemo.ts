@@ -21,6 +21,18 @@ export interface ConnectorTest {
 export interface MaimemoConnector {
   readonly kind: 'token' | 'oidc';
   readonly label: string;
+  /**
+   * 稳定的本地账号标识，用于数据隔离。
+   *
+   * 修正记录（2026-10-28）：
+   *   此前快照与文章都用 `connector.kind`（只有 'token' / 'oidc' 两个值）当 accountId，
+   *   导致：
+   *     ① 所有 Token 用户的待办/文章/答题记录混在一起，换 Token 后看到前任的数据；
+   *     ② store 层写入的是 `oidc:<sub>`，这里却写 `oidc`，两边对不上，
+   *        每次打开都得重新拉快照，永远命中不了缓存。
+   *   现在改为返回按真实账号派生的稳定 key。
+   */
+  accountKey(): string;
   accessToken(): Promise<string>;
   test(relayUrl?: string): Promise<ConnectorTest>;
 }
@@ -166,8 +178,8 @@ export async function fetchTodaySnapshot(connector: MaimemoConnector, relayUrl: 
       ? '墨墨没有返回今日单词。常见原因：当天还没在 App 里打开学习、未开启自动同步，或今日任务尚未初始化。'
       : undefined;
   return {
-    id: todayKey(connector.kind),
-    accountId: connector.kind,
+    id: todayKey(connector.accountKey()),
+    accountId: connector.accountKey(),
     date: localDateString(),
     fetchedAt: Date.now(),
     source: 'maimemo',
@@ -191,6 +203,16 @@ export async function lookupVocabulary(
   return res.voc ?? null;
 }
 
+/** 由 Token 派生的稳定指纹：不暴露原文，同一 Token 恒定映射到同一账号 */
+function fingerprint(token: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < token.length; i += 1) {
+    h ^= token.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
 export class TokenConnector implements MaimemoConnector {
   readonly kind = 'token' as const;
   readonly label = '个人 Token';
@@ -198,6 +220,12 @@ export class TokenConnector implements MaimemoConnector {
 
   constructor(token: string) {
     this.token = token.trim();
+  }
+
+  /** 换 Token 即视为换账号，数据互不可见 */
+  accountKey(): string {
+    if (!this.token) return 'token:anonymous';
+    return `token:${fingerprint(this.token)}`;
   }
 
   async accessToken(): Promise<string> {
@@ -238,6 +266,12 @@ export class OidcConnector implements MaimemoConnector {
   constructor(tokens: OidcTokens, clientId: string) {
     this.tokens = tokens;
     this.clientId = clientId;
+  }
+
+  /** 与 store 层的 `oidc:<sub>` 保持完全一致，否则快照永远命中不了缓存 */
+  accountKey(): string {
+    const sub = this.tokens.sub;
+    return sub ? `oidc:${sub}` : 'oidc:unknown';
   }
 
   async accessToken(): Promise<string> {

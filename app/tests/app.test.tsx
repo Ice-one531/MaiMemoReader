@@ -80,7 +80,11 @@ describe('生成管线（fetch 模拟）', () => {
     };
     const article = {
       title: 'Attention',
-      paragraphs: ['Paragraph one about attention. '.repeat(3), 'Paragraph two. '.repeat(4), 'Paragraph three. '.repeat(4)],
+      paragraphs: [
+        'Paragraph one about attention and how we sustain it over time. '.repeat(24),
+        'Paragraph two adds more detail about subtle differences in focus. '.repeat(12),
+        'Paragraph three concludes the discussion of sustained attention. '.repeat(6),
+      ],
       translation: ['一', '二', '三'],
       words: [
         { word: 'sustain', surface: 'sustaining', meaning: '维持', inContext: 'sustaining attention' },
@@ -94,7 +98,7 @@ describe('生成管线（fetch 模拟）', () => {
           stem: 'What does the author say?',
           options: ['A1', 'B1', 'C1', 'D1'],
           answerIndex: 1,
-          evidence: 'Paragraph one about attention.',
+          evidence: 'Paragraph one about attention and how we sustain it over time.',
           explanation: '解析'.repeat(30),
         },
       ],

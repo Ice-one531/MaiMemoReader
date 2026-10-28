@@ -3,10 +3,10 @@ import { navigate } from '../lib/router';
 import { useApp } from '../state/store';
 import { idb } from '../lib/db';
 import { relativeTime } from '../lib/format';
-import type { Article, QuizAttempt } from '../types';
+import type { Article, GenerationTask, QuizAttempt } from '../types';
 
 export default function Library() {
-  const { library, refreshLibrary, notify, accountId } = useApp();
+  const { library, refreshLibrary, refreshTasks, notify, accountId } = useApp();
   const [query, setQuery] = useState('');
   const [exam, setExam] = useState<'all' | Article['exam']>('all');
   const [onlyFav, setOnlyFav] = useState(false);
@@ -36,15 +36,52 @@ export default function Library() {
   );
 
   const remove = async (article: Article) => {
-    if (!window.confirm(`删除《${article.title}》？相关题目与作答记录也会一起删除。`)) return;
+    if (
+      !window.confirm(
+        `删除《${article.title}》？\n\n相关题目、作答记录，以及生成任务里保存的文章副本都会一起删除。`,
+      )
+    ) {
+      return;
+    }
+
+    /* ① 文章本体 */
     await idb.del('articles', article.id);
+
+    /* ② 题目 */
     const qs = await idb.all<{ id: string; articleId: string }>('questions');
     for (const q of qs.filter((x) => x.articleId === article.id)) await idb.del('questions', q.id);
+
+    /* ③ 作答记录 */
     const as = await idb.all<QuizAttempt>('attempts');
     for (const a of as.filter((x) => x.articleId === article.id)) await idb.del('attempts', a.id);
+
+    /* ④ 生成任务里嵌入的文章副本与题目 —— 否则「导出全部数据」还会把已删文章带出去 */
+    const tasks = await idb.all<GenerationTask>('tasks');
+    for (const t of tasks) {
+      const hadArticle = (t.articles ?? []).some((x) => x.id === article.id);
+      const hadQuestions = Boolean(t.questions?.[article.id]);
+      if (!hadArticle && !hadQuestions) continue;
+
+      const next: GenerationTask = {
+        ...t,
+        articles: (t.articles ?? []).filter((x) => x.id !== article.id),
+        questions: { ...(t.questions ?? {}) },
+      };
+      delete next.questions[article.id];
+
+      if (next.articles.length === 0) {
+        // 这个任务的所有产物都删完了，整个任务也没有保留价值
+        await idb.del('tasks', t.id);
+      } else {
+        next.updatedAt = Date.now();
+        await idb.put('tasks', t.id, next);
+      }
+    }
+
     await refreshLibrary();
+    await refreshTasks();
     setAttempts(await idb.all<QuizAttempt>('attempts'));
-    notify('已删除', 'warn');
+    notify('已删除（含任务记录里的副本）', 'warn');
   };
 
   const taskOf = async (article: Article) => {

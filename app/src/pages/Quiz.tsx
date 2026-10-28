@@ -4,6 +4,7 @@ import { useApp } from '../state/store';
 import { idb } from '../lib/db';
 import { letter } from '../lib/format';
 import type { Article, Question, QuizAttempt } from '../types';
+import { PRACTICE_FLAG_KEY, PRACTICE_RESULT_KEY } from './Result';
 
 export default function Quiz({ articleId }: { articleId: string }) {
   const { notify } = useApp();
@@ -35,6 +36,16 @@ export default function Quiz({ articleId }: { articleId: string }) {
     }
     setSubmitting(true);
     const score = questions.reduce((sum, q, i) => sum + (answers[i] === q.answerIndex ? 1 : 0), 0);
+
+    // 结果页点「重新练习」时会写这个标记，表示本次不计入历史
+    let practice = false;
+    try {
+      practice = sessionStorage.getItem(PRACTICE_FLAG_KEY) === article.id;
+      if (practice) sessionStorage.removeItem(PRACTICE_FLAG_KEY);
+    } catch {
+      /* ignore */
+    }
+
     const attempt: QuizAttempt = {
       id: `attempt-${Date.now()}`,
       articleId: article.id,
@@ -43,7 +54,18 @@ export default function Quiz({ articleId }: { articleId: string }) {
       total: questions.length,
       createdAt: Date.now(),
     };
-    await idb.put('attempts', attempt.id, attempt);
+
+    if (practice) {
+      // 练习模式：不写 attempts，只把结果放进 sessionStorage 供结果页一次性展示
+      try {
+        sessionStorage.setItem(PRACTICE_RESULT_KEY, JSON.stringify(attempt));
+      } catch {
+        /* ignore */
+      }
+    } else {
+      await idb.put('attempts', attempt.id, attempt);
+    }
+
     setSubmitting(false);
     navigate(`result/${article.id}`);
   };

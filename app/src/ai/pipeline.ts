@@ -18,6 +18,9 @@ import {
 } from './prompts';
 import {
   buildArticle,
+  checkTranslationAlignment,
+  checkWordCoverage,
+  MIN_WORDS_BY_LENGTH,
   validateArticle,
   validateQa,
   validateQuestions,
@@ -201,7 +204,7 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
         },
       );
       task.usage = addUsage(task.usage, res.usage, options.model);
-      const draft = validateArticle(extractJson(res.content));
+      const draft = validateArticle(extractJson(res.content), MIN_WORDS_BY_LENGTH[options.length]);
       const wordCount = countWords(draft.paragraphs);
       article = buildArticle(
         draft,
@@ -228,6 +231,14 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
       await idb.put('articles', article.id, article);
     }
 
+    // 供质量阶段做确定性检查的视图（article 已含 paragraphs / translation / words）
+    const draftView = {
+      title: article.title,
+      paragraphs: article.paragraphs,
+      translation: article.translation,
+      words: article.words,
+    };
+
     /* ---------------- 阶段 3：命题 ---------------- */
     let questions: Question[] = task.questions[article.id] ?? [];
     if (!questions.length) {
@@ -241,8 +252,11 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
         3000,
       );
       task.usage = addUsage(task.usage, usage, options.model);
-      questions = validateQuestions(extractJson(raw), article.id);
+      const parsed = validateQuestions(extractJson(raw), article.id, options.questionCount);
+      questions = parsed.questions;
       task.questions[article.id] = questions;
+      // 命题阶段的确定性校验结果，留到质量阶段一起汇报
+      task.qaNotes = parsed.issues.length ? parsed.issues : undefined;
       say('questions', 1, `${questions.length} 道题已就位`);
       await save(task);
       hooks.onTask({ ...task });
@@ -262,8 +276,23 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
         );
         task.usage = addUsage(task.usage, usage, options.model);
         const report = validateQa(extractJson(raw));
-        const notes: string[] = [...report.notes];
-        if (report.coverageIssues.length) notes.push(`以下词未在正文出现：${report.coverageIssues.join('、')}`);
+
+        // ---- 先跑确定性检查，不依赖 AI 自评 ----
+        const detIssues: string[] = [];
+        const coverage = checkWordCoverage(draftView, planArticle ? planArticle.targetWords : []);
+        if (coverage.missing.length) {
+          detIssues.push(`以下目标词未在正文出现：${coverage.missing.slice(0, 12).join('、')}`);
+        }
+        detIssues.push(...checkTranslationAlignment(draftView));
+
+        // ---- 再合并 AI 质检意见 ----
+        const notes: string[] = [];
+        if (detIssues.length) notes.push('【程序检查】', ...detIssues, '');
+        if (!report.pass) {
+          notes.push('【AI 质量检查未通过】');
+        }
+        notes.push(...report.notes);
+        if (report.coverageIssues.length) notes.push(`AI 认为以下词未在正文出现：${report.coverageIssues.join('、')}`);
         report.questionIssues.forEach((q) => notes.push(`第 ${q.index + 1} 题：${q.problem}`));
 
         const weak = questions.filter((q) => !q.evidence || q.explanation.length < 40);
@@ -285,7 +314,13 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
           });
         }
         task.questions[article.id] = questions;
-        task.qaNotes = notes.length ? notes : ['质量检查通过：词汇覆盖、答案与原文依据一致。'];
+        const clean = notes.filter((n) => n && n.trim()).length > 0;
+        if (!clean) {
+          task.qaNotes = ['质量检查通过：词汇覆盖、译文对齐、答案与原文依据一致。'];
+        } else {
+          // 有问题的项一律保留，让用户在阅读页看到，不粉饰为"通过"
+          task.qaNotes = notes.filter((n) => n !== '' || n === '');
+        }
       } catch (err) {
         if (signal.aborted) throw err;
         // 质检属于增强阶段，失败不阻断交付
@@ -299,7 +334,8 @@ export async function runPipeline(input: PipelineInput, hooks: PipelineHooks): P
     /* ---------------- 收尾 ---------------- */
     say('save', 0.5, '正在把文章放进书架');
     await idb.put('articles', article.id, article);
-    questions.forEach((q) => void idb.put('questions', q.id, q));
+    // 必须等所有题目落盘后再标完成，否则阅读页可能读到不完整的题目集合
+    await Promise.all(questions.map((q) => idb.put('questions', q.id, q)));
     task.status = 'complete';
     task.stage = 'done';
     task.progress = 100;

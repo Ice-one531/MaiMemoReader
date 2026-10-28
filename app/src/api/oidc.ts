@@ -245,6 +245,34 @@ export function listStoredAccounts(): { sub: string; name?: string }[] {
   return out;
 }
 
+/**
+ * 清除本机保存的全部 OIDC 令牌与授权上下文。
+ *
+ * 「清除本机所有数据」必须调用这里，否则 IndexedDB 清空了，
+ * localStorage 里的 access_token / refresh_token 依然留着，
+ * 列表还会列出已"删除"的账号。
+ * @returns 实际清除的令牌条目数
+ */
+export function clearAllStoredTokens(): number {
+  let removed = 0;
+  try {
+    const keys: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(TOKEN_KEY_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      localStorage.removeItem(key);
+      removed += 1;
+    }
+    // 未完成的授权流程也一并丢弃
+    sessionStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* ignore */
+  }
+  return removed;
+}
+
 export async function revokeTokens(tokens: OidcTokens): Promise<void> {
   try {
     await fetch(OIDC.revocationEndpoint, {

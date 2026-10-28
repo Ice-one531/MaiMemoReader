@@ -12,7 +12,13 @@ import {
 import { idb } from '../lib/db';
 import { loadSettings, saveSettings, DEFAULT_SETTINGS } from '../lib/settings';
 import { localDateString, OidcConnector, TokenConnector, type MaimemoConnector } from '../api/maimemo';
-import { listStoredAccounts, loadStoredTokens, revokeTokens, type OidcTokens } from '../api/oidc';
+import {
+  clearAllStoredTokens,
+  listStoredAccounts,
+  loadStoredTokens,
+  revokeTokens,
+  type OidcTokens,
+} from '../api/oidc';
 import type { AppSettings, Article, GenerationTask, StudySnapshot } from '../types';
 
 export interface Toast {
@@ -148,6 +154,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return null;
   }, [settings.maimemoMode, settings.maimemoToken, settings.oidcClientId, oidcTokens]);
 
+  /**
+   * 账号标识同步：连接器换了（换 Token / 换 OIDC 账号）就必须切 accountId，
+   * 否则数据会继续挂在上一个账号名下。
+   */
+  useEffect(() => {
+    if (!ready) return;
+    if (settings.maimemoMode === 'none') return;
+    const expected = connector ? connector.accountKey() : '';
+    if (!expected) return;
+    if (settings.accountId === expected) return;
+    const next: AppSettings = { ...settings, accountId: expected };
+    setSettingsState(next);
+    void saveSettings(next);
+    void (async () => {
+      const key = snapshotKey(expected, localDateString());
+      const cached = await idb.get<StudySnapshot>('snapshots', key);
+      setSnapshot(cached ?? null);
+    })();
+  }, [ready, connector, settings]);
+
   const applyOidcTokens = useCallback(
     async (tokens: OidcTokens) => {
       setOidcTokens(tokens);
@@ -170,8 +196,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const logoutMaimemo = useCallback(async () => {
-    if (oidcTokens) await revokeTokens(oidcTokens);
+    if (oidcTokens) {
+      try {
+        await revokeTokens(oidcTokens);
+      } catch {
+        /* 撤销失败不阻断本地登出 */
+      }
+    }
+    // 双保险：即使 revoke 失败，也把本地令牌清干净
+    clearAllStoredTokens();
     setOidcTokens(null);
+    setKnownAccounts([]);
     const next: AppSettings = { ...settings, maimemoMode: 'none', maimemoToken: '', accountId: 'local' };
     setSettingsState(next);
     await saveSettings(next);
@@ -180,6 +215,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [oidcTokens, settings]);
 
   const resetAll = useCallback(async () => {
+    // ① 先尽力撤销服务端授权（失败不阻断本地清理）
+    if (oidcTokens) {
+      try {
+        await revokeTokens(oidcTokens);
+      } catch {
+        /* 网络失败也要继续清本地 */
+      }
+    }
+    // ② 清掉 localStorage / sessionStorage 里的全部 OIDC 令牌与待授权上下文
+    clearAllStoredTokens();
+    // ③ 再清 IndexedDB
     for (const store of ['snapshots', 'articles', 'questions', 'attempts', 'tasks', 'glossary', 'sessions', 'secrets'] as const) {
       await idb.clear(store);
     }
@@ -190,8 +236,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setLibrary([]);
     setTasks([]);
     setOidcTokens(null);
+    setKnownAccounts([]);
     setConnectorState('unknown');
-  }, []);
+  }, [oidcTokens]);
 
   const value: StoreValue = {
     ready,

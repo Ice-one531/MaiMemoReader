@@ -81,6 +81,9 @@ export function costOf(model: string, usage: TokenUsage | null, searchCalls = 0)
   return modelCost + searchCost;
 }
 
+/** 流式响应两帧之间允许的最长静默；超过即判定网络卡死，不再无限等待 */
+const STREAM_IDLE_TIMEOUT = 45_000;
+
 async function post(path: string, apiKey: string, body: unknown, signal?: AbortSignal, timeoutMs = 240_000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -171,7 +174,36 @@ export async function chat(messages: ChatMessage[], opts: ChatOptions): Promise<
   let usage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0 };
   let finish = 'stop';
   for (;;) {
-    const { value, done } = await reader.read();
+    // post() 的超时只覆盖到拿到响应头为止；进入流式读取后必须自己盯着心跳，
+    // 否则网络半途卡死会一直挂着不退，用户既看不到进度也拿不到错误。
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const idle = new Promise<never>((_, reject) => {
+      idleTimer = setTimeout(() => {
+        reject(
+          new AppError(
+            'deepseek',
+            `流式响应中断：连续 ${Math.round(STREAM_IDLE_TIMEOUT / 1000)} 秒没有收到新数据，请检查网络后重试本阶段`,
+          ),
+        );
+      }, STREAM_IDLE_TIMEOUT);
+    });
+
+    let read: ReadableStreamReadResult<Uint8Array>;
+    try {
+      read = await Promise.race([reader.read(), idle]);
+    } catch (err) {
+      // 卡死时主动取消底层流，避免连接残留
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+    }
+
+    const { value, done } = read;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     let split = buffer.indexOf('\n\n');

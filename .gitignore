@@ -17,3 +17,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.log
+
+# 编辑过程中的备份文件
+*.bak
+*.bak2
+*.bak3
+*.orig
+*.rej
